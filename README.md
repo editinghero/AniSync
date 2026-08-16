@@ -13,6 +13,8 @@ A modified fork of AniSync, a native Android client for AniList.
   - Protected with a built-in 4-digit numeric keypad with auto-unlock upon entering the correct PIN.
   - The hidden item count badge on the tab is hidden for privacy.
   - Whenever the app is reopened or restarted, the selected tab resets automatically to "All" so the hidden list is never left open or exposed.
+ 
+> one flaw i found out that private + hide form list done so it became a ghost entry and doesn't appear anywhere in anilist except when you search, this was orginal logic for this but after many trial i found that anilist api drop such entries to make it appear it must be in a custom list so there it makes the whole logic fall apart if any suggestions anyone can tell
 
 ### 2. Google Gemini AI Assistant
 - Integrated AI assistant powered by Google Gemini and Gemma models.
