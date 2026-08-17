@@ -73,12 +73,25 @@ class AiChatViewModel @Inject constructor(
                 loadFocusedMediaDetails(focusedMediaId)
             }
         }
+
+        viewModelScope.launch {
+            appSettings.geminiModel.collect {
+                cachedUserData = null
+            }
+        }
     }
+
+    private var cachedUserData: List<AiUserDataEntry>? = null
 
     private suspend fun loadFocusedMediaDetails(mediaId: Int) {
         try {
             val details = detailsRepository.observeMediaDetails(mediaId).first()
             if (details != null) {
+                val animeEntries = libraryRepository.observeLibrary("", MediaType.ANIME).first()
+                val mangaEntries = libraryRepository.observeLibrary("", MediaType.MANGA).first()
+                val userEntry = animeEntries.firstOrNull { it.mediaId == mediaId }
+                    ?: mangaEntries.firstOrNull { it.mediaId == mediaId }
+
                 val focusContext = AiMediaFocusContext(
                     mediaId = details.id,
                     title = details.titleUserPreferred,
@@ -88,7 +101,12 @@ class AiChatViewModel @Inject constructor(
                     status = details.status,
                     averageScore = details.score,
                     episodes = details.episodes,
-                    studio = details.studios.firstOrNull()?.name ?: details.studio?.name
+                    studio = details.studios.firstOrNull()?.name ?: details.studio?.name,
+                    userStatus = userEntry?.status?.name,
+                    userProgress = userEntry?.progress,
+                    userTotal = userEntry?.totalEpisodes ?: userEntry?.totalChapters,
+                    userScore = userEntry?.score,
+                    userNotes = userEntry?.notes
                 )
                 _uiState.update { it.copy(focusedMedia = focusContext) }
             }
@@ -101,6 +119,7 @@ class AiChatViewModel @Inject constructor(
     }
 
     fun toggleUserData(enabled: Boolean) {
+        cachedUserData = null
         appSettings.setAiUserDataEnabled(enabled)
         _uiState.update { it.copy(userDataEnabled = enabled) }
     }
@@ -115,6 +134,7 @@ class AiChatViewModel @Inject constructor(
     }
 
     fun startNewChat() {
+        cachedUserData = null
         _uiState.update {
             it.copy(
                 currentSessionId = java.util.UUID.randomUUID().toString(),
@@ -125,6 +145,7 @@ class AiChatViewModel @Inject constructor(
     }
 
     fun loadSession(session: AiChatSession) {
+        cachedUserData = null
         _uiState.update {
             it.copy(
                 currentSessionId = session.id,
@@ -180,7 +201,8 @@ class AiChatViewModel @Inject constructor(
                 val aiMessage = ChatMessage(
                     text = result.text,
                     isUser = false,
-                    sources = result.sources
+                    sources = result.sources,
+                    thinkingProcess = result.thinkingProcess
                 )
 
                 val updatedList = currentMessages + aiMessage
@@ -219,32 +241,40 @@ class AiChatViewModel @Inject constructor(
 
     /**
      * Loads user's anime and manga library entries to provide full personal context.
+     * Caches in memory per session so we don't query Room repeatedly during conversations.
      */
-    private suspend fun getUserDataEntries(): List<AiUserDataEntry> = withContext(Dispatchers.IO) {
-        try {
-            val anime = libraryRepository.observeLibrary("", MediaType.ANIME).first()
-            val manga = libraryRepository.observeLibrary("", MediaType.MANGA).first()
+    private suspend fun getUserDataEntries(): List<AiUserDataEntry> {
+        val cached = cachedUserData
+        if (cached != null) return cached
 
-            val allEntries = (anime + manga)
+        return withContext(Dispatchers.IO) {
+            try {
+                val anime = libraryRepository.observeLibrary("", MediaType.ANIME).first()
+                val manga = libraryRepository.observeLibrary("", MediaType.MANGA).first()
 
-            allEntries.map { entry ->
-                AiUserDataEntry(
-                    titleUserPreferred = entry.titleUserPreferred,
-                    titleRomaji = entry.titleRomaji,
-                    titleEnglish = entry.titleEnglish,
-                    titleNative = entry.titleNative,
-                    mediaType = entry.type?.name ?: "ANIME",
-                    status = entry.status.name,
-                    progress = entry.progress,
-                    totalEpisodesOrChapters = entry.totalEpisodes ?: entry.totalChapters,
-                    score = entry.score,
-                    notes = entry.notes,
-                    startedAt = entry.startedAt,
-                    completedAt = entry.completedAt
-                )
+                val allEntries = (anime + manga)
+
+                val entries = allEntries.map { entry ->
+                    AiUserDataEntry(
+                        titleUserPreferred = entry.titleUserPreferred,
+                        titleRomaji = entry.titleRomaji,
+                        titleEnglish = entry.titleEnglish,
+                        titleNative = entry.titleNative,
+                        mediaType = entry.type?.name ?: "ANIME",
+                        status = entry.status.name,
+                        progress = entry.progress,
+                        totalEpisodesOrChapters = entry.totalEpisodes ?: entry.totalChapters,
+                        score = entry.score,
+                        notes = entry.notes,
+                        startedAt = entry.startedAt,
+                        completedAt = entry.completedAt
+                    )
+                }
+                cachedUserData = entries
+                entries
+            } catch (e: Exception) {
+                emptyList()
             }
-        } catch (e: Exception) {
-            emptyList()
         }
     }
 }

@@ -16,7 +16,8 @@ data class ChatMessage(
     val timestamp: Long = System.currentTimeMillis(),
     val sources: List<AiGroundingSource> = emptyList(),
     val isStreaming: Boolean = false,
-    val isError: Boolean = false
+    val isError: Boolean = false,
+    val thinkingProcess: String? = null
 )
 
 data class AiUserDataEntry(
@@ -43,7 +44,12 @@ data class AiMediaFocusContext(
     val status: String?,
     val averageScore: Int?,
     val episodes: Int?,
-    val studio: String?
+    val studio: String?,
+    val userStatus: String? = null,
+    val userProgress: Int? = null,
+    val userTotal: Int? = null,
+    val userScore: Double? = null,
+    val userNotes: String? = null
 )
 
 @Serializable

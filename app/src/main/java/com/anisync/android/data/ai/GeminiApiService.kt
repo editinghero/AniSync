@@ -44,7 +44,8 @@ class GeminiApiService @Inject constructor(
 
     data class GenerateResult(
         val text: String,
-        val sources: List<AiGroundingSource> = emptyList()
+        val sources: List<AiGroundingSource> = emptyList(),
+        val thinkingProcess: String? = null
     )
 
     suspend fun generateChatResponse(
@@ -62,47 +63,72 @@ class GeminiApiService @Inject constructor(
         }
 
         val endpoint = "https://generativelanguage.googleapis.com/v1beta/models/$modelName:generateContent?key=$apiKey"
-
         val systemPrompt = buildSystemPrompt(allowSpoilers, userData, mediaFocus)
+        val supportsTools = !modelName.startsWith("gemma", ignoreCase = true)
+
+        val contentsList = mutableListOf<JsonObject>()
+        val relevantHistory = conversationHistory.takeLast(12)
+        for (msg in relevantHistory) {
+            if (msg.isError || msg.text.isBlank()) continue
+            contentsList.add(buildJsonObject {
+                put("role", if (msg.isUser) "user" else "model")
+                putJsonArray("parts") {
+                    add(buildJsonObject { put("text", msg.text) })
+                }
+            })
+        }
+        contentsList.add(buildJsonObject {
+            put("role", "user")
+            putJsonArray("parts") {
+                add(buildJsonObject { put("text", latestUserMessage) })
+            }
+        })
+
+        fun buildToolsJson(): JsonArray {
+            return buildJsonArray {
+                if (supportsTools && userData.isNotEmpty()) {
+                    add(buildJsonObject {
+                        putJsonArray("functionDeclarations") {
+                            add(buildJsonObject {
+                                put("name", "getUserNotes")
+                                put("description", "Look up the user's personal notes, thoughts, review, or rating for a specific anime or manga title in their AniList library.")
+                                putJsonObject("parameters") {
+                                    put("type", "OBJECT")
+                                    putJsonObject("properties") {
+                                        putJsonObject("title") {
+                                            put("type", "STRING")
+                                            put("description", "The title of the anime or manga to retrieve notes for.")
+                                        }
+                                    }
+                                    putJsonArray("required") {
+                                        add("title")
+                                    }
+                                }
+                            })
+                        }
+                    })
+                }
+                if (useWebSearch && supportsTools) {
+                    add(buildJsonObject {
+                        putJsonObject("googleSearch") {}
+                    })
+                }
+            }
+        }
+
+        val initialTools = buildToolsJson()
 
         val requestJson = buildJsonObject {
-            // System instructions
             putJsonObject("systemInstruction") {
                 putJsonArray("parts") {
                     add(buildJsonObject { put("text", systemPrompt) })
                 }
             }
-
-            // Chat contents
             putJsonArray("contents") {
-                // Add conversation history (up to last 12 messages for context)
-                val relevantHistory = conversationHistory.takeLast(12)
-                for (msg in relevantHistory) {
-                    if (msg.isError || msg.text.isBlank()) continue
-                    add(buildJsonObject {
-                        put("role", if (msg.isUser) "user" else "model")
-                        putJsonArray("parts") {
-                            add(buildJsonObject { put("text", msg.text) })
-                        }
-                    })
-                }
-
-                // Add current message
-                add(buildJsonObject {
-                    put("role", "user")
-                    putJsonArray("parts") {
-                        add(buildJsonObject { put("text", latestUserMessage) })
-                    }
-                })
+                contentsList.forEach { add(it) }
             }
-
-            // Google Grounding / Web search tool
-            if (useWebSearch) {
-                putJsonArray("tools") {
-                    add(buildJsonObject {
-                        putJsonObject("googleSearch") {}
-                    })
-                }
+            if (initialTools.isNotEmpty()) {
+                put("tools", initialTools)
             }
         }
 
@@ -114,8 +140,29 @@ class GeminiApiService @Inject constructor(
             .post(requestBody)
             .build()
 
-        val response = client.newCall(request).execute()
-        val responseBody = response.body?.string() ?: throw IOException("Empty response from Gemini API")
+        var response = client.newCall(request).execute()
+        var responseBody = response.body?.string() ?: throw IOException("Empty response from Gemini API")
+
+        // Fallback retry without tools if custom model rejected tool definitions
+        if (!response.isSuccessful && initialTools.isNotEmpty()) {
+            val fallbackJson = buildJsonObject {
+                putJsonObject("systemInstruction") {
+                    putJsonArray("parts") {
+                        add(buildJsonObject { put("text", systemPrompt) })
+                    }
+                }
+                putJsonArray("contents") {
+                    contentsList.forEach { add(it) }
+                }
+            }
+            val fallbackBody = fallbackJson.toString().toRequestBody(mediaType)
+            val fallbackReq = Request.Builder().url(endpoint).post(fallbackBody).build()
+            val fallbackResp = client.newCall(fallbackReq).execute()
+            if (fallbackResp.isSuccessful) {
+                response = fallbackResp
+                responseBody = fallbackResp.body?.string() ?: responseBody
+            }
+        }
 
         if (!response.isSuccessful) {
             val errorMsg = runCatching {
@@ -123,6 +170,94 @@ class GeminiApiService @Inject constructor(
                 element["error"]?.jsonObject?.get("message")?.jsonPrimitive?.contentOrNull
             }.getOrNull() ?: "Gemini API error (HTTP ${response.code})"
             throw IOException(errorMsg)
+        }
+
+        // Check if model returned a functionCall for getUserNotes
+        val root = json.parseToJsonElement(responseBody).jsonObject
+        val candidates = root["candidates"]?.jsonArray
+        val firstCandidate = candidates?.firstOrNull()?.jsonObject
+        val content = firstCandidate?.get("content")?.jsonObject
+        val parts = content?.get("parts")?.jsonArray
+
+        val functionCallPart = parts?.firstOrNull {
+            it.jsonObject.containsKey("functionCall")
+        }?.jsonObject?.get("functionCall")?.jsonObject
+
+        if (functionCallPart != null) {
+            val funcName = functionCallPart["name"]?.jsonPrimitive?.contentOrNull
+            if (funcName == "getUserNotes") {
+                val targetTitle = functionCallPart["args"]?.jsonObject?.get("title")?.jsonPrimitive?.contentOrNull ?: ""
+                val cleanQuery = targetTitle.trim().lowercase()
+
+                val matchedEntry = userData.firstOrNull {
+                    it.titleUserPreferred.lowercase().contains(cleanQuery) ||
+                    it.titleRomaji?.lowercase()?.contains(cleanQuery) == true ||
+                    it.titleEnglish?.lowercase()?.contains(cleanQuery) == true ||
+                    it.titleNative?.lowercase()?.contains(cleanQuery) == true
+                }
+
+                val noteResult = if (matchedEntry != null) {
+                    if (!matchedEntry.notes.isNullOrBlank()) {
+                        "Personal notes for '${matchedEntry.titleUserPreferred}': \"${matchedEntry.notes}\" (Status: ${matchedEntry.status}, Score: ${matchedEntry.score ?: "Unrated"})"
+                    } else {
+                        "User has '${matchedEntry.titleUserPreferred}' tracked (${matchedEntry.status}, Progress: ${matchedEntry.progress}, Score: ${matchedEntry.score ?: "Unrated"}), but has not written any personal notes."
+                    }
+                } else {
+                    "No entry matching '$targetTitle' was found in user's library."
+                }
+
+                // Send function response back to Gemini to complete answer
+                val followUpRequestJson = buildJsonObject {
+                    putJsonObject("systemInstruction") {
+                        putJsonArray("parts") {
+                            add(buildJsonObject { put("text", systemPrompt) })
+                        }
+                    }
+                    putJsonArray("contents") {
+                        contentsList.forEach { add(it) }
+                        // Model turn with functionCall
+                        add(buildJsonObject {
+                            put("role", "model")
+                            putJsonArray("parts") {
+                                add(buildJsonObject {
+                                    putJsonObject("functionCall") {
+                                        put("name", "getUserNotes")
+                                        putJsonObject("args") {
+                                            put("title", targetTitle)
+                                        }
+                                    }
+                                })
+                            }
+                        })
+                        // Tool response turn
+                        add(buildJsonObject {
+                            put("role", "function")
+                            putJsonArray("parts") {
+                                add(buildJsonObject {
+                                    putJsonObject("functionResponse") {
+                                        put("name", "getUserNotes")
+                                        putJsonObject("response") {
+                                            put("name", "getUserNotes")
+                                            putJsonObject("content") {
+                                                put("result", noteResult)
+                                            }
+                                        }
+                                    }
+                                })
+                            }
+                        })
+                    }
+                }
+
+                val followUpBody = followUpRequestJson.toString().toRequestBody(mediaType)
+                val followUpReq = Request.Builder().url(endpoint).post(followUpBody).build()
+                val followUpResp = client.newCall(followUpReq).execute()
+                val followUpBodyStr = followUpResp.body?.string() ?: throw IOException("Empty response from tool resolution")
+
+                if (followUpResp.isSuccessful) {
+                    return@withContext parseGeminiResponse(followUpBodyStr)
+                }
+            }
         }
 
         parseGeminiResponse(responseBody)
@@ -140,9 +275,29 @@ class GeminiApiService @Inject constructor(
         val parts = content?.get("parts")?.jsonArray
 
         val textBuilder = StringBuilder()
+        val thinkingBuilder = StringBuilder()
+
         parts?.forEach { part ->
-            part.jsonObject["text"]?.jsonPrimitive?.contentOrNull?.let {
-                textBuilder.append(it)
+            val obj = part.jsonObject
+            val partText = obj["text"]?.jsonPrimitive?.contentOrNull ?: ""
+            val isThought = obj["thought"]?.jsonPrimitive?.booleanOrNull == true
+            if (isThought) {
+                thinkingBuilder.append(partText)
+            } else {
+                textBuilder.append(partText)
+            }
+        }
+
+        var finalThinking = thinkingBuilder.toString().trim().ifBlank { null }
+        var finalText = textBuilder.toString()
+
+        // Also check for <thought>...</thought> or <think>...</think> XML tags in text
+        if (finalThinking == null) {
+            val thoughtRegex = Regex("""(?s)<(thought|think)>(.*?)</\1>""")
+            val match = thoughtRegex.find(finalText)
+            if (match != null) {
+                finalThinking = match.groupValues[2].trim()
+                finalText = finalText.replace(thoughtRegex, "").trim()
             }
         }
 
@@ -160,8 +315,9 @@ class GeminiApiService @Inject constructor(
         }
 
         return GenerateResult(
-            text = textBuilder.toString().ifBlank { "I was unable to generate a response." },
-            sources = sources.distinctBy { it.url }
+            text = finalText.ifBlank { "I was unable to generate a response." },
+            sources = sources.distinctBy { it.url },
+            thinkingProcess = finalThinking
         )
     }
 
@@ -188,7 +344,19 @@ class GeminiApiService @Inject constructor(
             }
             mediaFocus.studio?.let { sb.appendLine("Studio / Producers: $it") }
             mediaFocus.description?.let {
-                sb.appendLine("Synopsis: ${it.take(1500)}")
+                sb.appendLine("Synopsis: ${it.take(1200)}")
+            }
+            if (mediaFocus.userStatus != null || !mediaFocus.userNotes.isNullOrBlank() || mediaFocus.userScore != null) {
+                sb.appendLine("--- User's Personal Record on this Title ---")
+                mediaFocus.userStatus?.let { sb.appendLine("User Status: $it") }
+                mediaFocus.userProgress?.let { prog ->
+                    val total = mediaFocus.userTotal?.let { "/$it" } ?: ""
+                    sb.appendLine("User Progress: $prog$total")
+                }
+                mediaFocus.userScore?.let { sb.appendLine("User Score: $it/100") }
+                if (!mediaFocus.userNotes.isNullOrBlank()) {
+                    sb.appendLine("User's Personal Notes: \"${mediaFocus.userNotes}\"")
+                }
             }
             sb.appendLine("Prioritize this specific title in your answers when relevant.")
             sb.appendLine()
@@ -206,22 +374,22 @@ class GeminiApiService @Inject constructor(
 
         if (userData.isNotEmpty()) {
             sb.appendLine("### USER'S PERSONAL ANILIST LIBRARY DATA (User Data toggle is ON):")
-            sb.appendLine("You have access to the user's personal watch/read library, including their scores, progress, personal notes, and dates.")
-            sb.appendLine("Always check this list when the user asks about their notes, score, opinions, or list progress on any anime/manga (e.g. Domestic Girlfriend, Frieren, etc.):")
+            sb.appendLine("You have access to a compact index of the user's anime and manga entries (status, score, and progress).")
+            sb.appendLine("If the user asks about their specific personal notes, comments, or thoughts for a title, call the `getUserNotes` tool function to retrieve them.")
             for (entry in userData) {
                 val titlePart = buildString {
                     append(entry.titleUserPreferred)
-                    val altTitles = listOfNotNull(entry.titleRomaji, entry.titleEnglish, entry.titleNative)
+                    val altTitles = listOfNotNull(entry.titleRomaji, entry.titleEnglish)
                         .filter { it != entry.titleUserPreferred }
                         .distinct()
                     if (altTitles.isNotEmpty()) {
                         append(" (aka ${altTitles.joinToString(" / ")})")
                     }
                 }
-                val scorePart = entry.score?.let { "$it/100" } ?: "Not rated"
-                val notePart = if (!entry.notes.isNullOrBlank()) " | Notes: \"${entry.notes.replace("\n", " ")}\"" else ""
+                val scorePart = entry.score?.let { "$it/100" } ?: "Unrated"
                 val totalPart = entry.totalEpisodesOrChapters?.let { "/$it" } ?: ""
-                sb.appendLine("• [$titlePart] Type: ${entry.mediaType} | Status: ${entry.status} | Progress: ${entry.progress}$totalPart | User Score: $scorePart$notePart")
+                val noteTag = if (!entry.notes.isNullOrBlank()) " [Has Notes]" else ""
+                sb.appendLine("• [$titlePart] Type: ${entry.mediaType} | Status: ${entry.status} | Progress: ${entry.progress}$totalPart | Score: $scorePart$noteTag")
             }
             sb.appendLine()
         } else {
