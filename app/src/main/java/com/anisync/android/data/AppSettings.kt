@@ -224,6 +224,32 @@ class AppSettings @Inject constructor(
     private val _aiChatSessions = MutableStateFlow(readAiChatSessions())
     val aiChatSessions: StateFlow<List<com.anisync.android.domain.ai.AiChatSession>> = _aiChatSessions.asStateFlow()
 
+    private fun readCustomMediaUrls(): Map<Int, String> {
+        val raw = prefs.getString(KEY_CUSTOM_MEDIA_URLS, null) ?: return emptyMap()
+        return runCatching {
+            jsonSerializer.decodeFromString<Map<Int, String>>(raw)
+        }.getOrDefault(emptyMap())
+    }
+
+    private val _customMediaUrls = MutableStateFlow(readCustomMediaUrls())
+    val customMediaUrls: StateFlow<Map<Int, String>> = _customMediaUrls.asStateFlow()
+
+    fun getCustomMediaUrl(mediaId: Int): String? {
+        return _customMediaUrls.value[mediaId]
+    }
+
+    fun setCustomMediaUrl(mediaId: Int, url: String?) {
+        val current = _customMediaUrls.value.toMutableMap()
+        if (url.isNullOrBlank()) {
+            current.remove(mediaId)
+        } else {
+            current[mediaId] = url.trim()
+        }
+        _customMediaUrls.value = current
+        val serialized = jsonSerializer.encodeToString(current)
+        prefs.edit().putString(KEY_CUSTOM_MEDIA_URLS, serialized).apply()
+    }
+
     // Navigation bar style (anchored rounded top vs floating pill)
     private val _navBarStyle = MutableStateFlow(readNavBarStyle())
     val navBarStyle: StateFlow<NavBarStyle> = _navBarStyle.asStateFlow()
@@ -1276,6 +1302,7 @@ companion object {
         private const val KEY_APP_LOCK_PASSWORD_HASH = "app_lock_password_hash"
         private const val KEY_APP_LOCK_PASSWORD_SALT = "app_lock_password_salt"
         private const val KEY_APP_LOCK_BIOMETRICS_ENABLED = "app_lock_biometrics_enabled"
+        private const val KEY_CUSTOM_MEDIA_URLS = "custom_media_urls"
     }
 }
 

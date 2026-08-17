@@ -7,6 +7,11 @@ import com.anisync.android.domain.ai.ChatMessage
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
@@ -101,7 +106,7 @@ class GeminiApiService @Inject constructor(
                                         }
                                     }
                                     putJsonArray("required") {
-                                        add("title")
+                                        add(JsonPrimitive("title"))
                                     }
                                 }
                             })
@@ -125,7 +130,7 @@ class GeminiApiService @Inject constructor(
                 }
             }
             putJsonArray("contents") {
-                contentsList.forEach { add(it) }
+                contentsList.forEach { elem -> add(elem as JsonElement) }
             }
             if (initialTools.isNotEmpty()) {
                 put("tools", initialTools)
@@ -152,7 +157,7 @@ class GeminiApiService @Inject constructor(
                     }
                 }
                 putJsonArray("contents") {
-                    contentsList.forEach { add(it) }
+                    contentsList.forEach { elem -> add(elem as JsonElement) }
                 }
             }
             val fallbackBody = fallbackJson.toString().toRequestBody(mediaType)
@@ -214,7 +219,7 @@ class GeminiApiService @Inject constructor(
                         }
                     }
                     putJsonArray("contents") {
-                        contentsList.forEach { add(it) }
+                        contentsList.forEach { elem -> add(elem as JsonElement) }
                         // Model turn with functionCall
                         add(buildJsonObject {
                             put("role", "model")

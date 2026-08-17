@@ -215,6 +215,7 @@ fun MediaDetailsScreen(
     val cast by viewModel.cast.collectAsStateWithLifecycle()
     val staff by viewModel.staff.collectAsStateWithLifecycle()
     val mediaStats by viewModel.stats.collectAsStateWithLifecycle()
+    val customMediaUrls by viewModel.customMediaUrls.collectAsStateWithLifecycle()
     val pullToRefreshState = rememberPullToRefreshState()
 
     val spatialSpec = AppMotion.rememberSpatialSpec()
@@ -765,6 +766,8 @@ fun MediaDetailsScreen(
                     titleLanguage = titleLanguage,
                     scoreFormat = userScoreFormat,
                     availableCustomLists = availableLists,
+                    initialCustomUrl = customMediaUrls[entry.mediaId],
+                    onCustomUrlSave = viewModel::saveCustomMediaUrl,
                     onDismiss = viewModel::closeEditSheet,
                     onSave = viewModel::saveLibraryEntry,
                     onDelete = {
